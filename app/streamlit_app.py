@@ -243,7 +243,9 @@ def main():
             longitude=map_center[1],
             zoom=13.5,
         )
-        tooltip = {"text": "seg={segment_id}\nclass={road_class}\nv/c={vc_ratio}\nmean_flow={mean_flow_vph}"}
+        tooltip = {
+            "text": "name={street_name}\nseg={segment_id}\nclass={road_class}\nv/c={vc_ratio:.2f}\nmean_flow={mean_flow_vph:.0f}"
+        }
         deck = pdk.Deck(layers=[layer], initial_view_state=view_state, tooltip=tooltip)
         st.pydeck_chart(deck, width="stretch", height=420)
     except Exception:
@@ -280,7 +282,7 @@ def main():
     ranking["score"] = ranking["mean_flow_vph"] * ranking["length_m"]
     ranking = ranking.sort_values("score", ascending=False).head(30).reset_index(drop=True)
     ranking["rank"] = range(1, len(ranking) + 1)
-    display_rank = ranking[["rank", "segment_id", "road_class", "length_m", "mean_flow_vph", "score"]].copy()
+    display_rank = ranking[["rank", "segment_id", "street_name", "road_class", "length_m", "mean_flow_vph", "score"]].copy()
     display_rank["length_m"] = display_rank["length_m"].round(1)
     display_rank["mean_flow_vph"] = display_rank["mean_flow_vph"].round(0)
     display_rank["score"] = display_rank["score"].round(0)

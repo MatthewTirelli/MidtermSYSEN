@@ -194,6 +194,7 @@ def build_segment_dataset(gdf_edges):
         tags = row if isinstance(row, dict) else row.to_dict()
         lanes = _lanes_from_tags(tags, road_class)
         speed_kmh = _free_flow_speed_kmh(tags, road_class)
+        street_name = tags.get("name")
         geom = row.get("geometry")
         if geom is None:
             continue
@@ -224,6 +225,7 @@ def build_segment_dataset(gdf_edges):
             "lanes": lanes,
             "free_flow_speed_kmh": round(speed_kmh, 2),
             "capacity_vph": int(capacity_vph),
+            "street_name": street_name,
         })
     return pd.DataFrame(rows)
 
