@@ -1,0 +1,29 @@
+---
+description: Strategy for building CSV datasets for Supabase upload (road segments + traffic)
+alwaysApply: true
+---
+
+# CSV / Supabase Data Strategy
+
+Use this pipeline when creating the CSVs that will be uploaded to Supabase.
+
+1. **Select a real city and extract its road network**  
+   Choose a small city or neighborhood and download its street network from OpenStreetMap, converting the roads into individual street segments with unique IDs and geometry.
+
+2. **Build a static street segment dataset**  
+   For each segment compute attributes such as length, road classification, estimated lane count, free-flow speed, and traffic capacity.
+
+3. **Assign baseline demand to each segment**  
+   Estimate a base traffic demand (vehicles/hour) using road class, lane count, and optionally distance from the city center to create realistic spatial differences in traffic intensity.
+
+4. **Define temporal demand patterns**  
+   Create daily traffic profiles (morning peak, midday, evening peak, overnight) and weekday/weekend modifiers that will scale traffic demand over time.
+
+5. **Generate synthetic flow values for each segment over time**  
+   For every `(segment, timestamp)` pair, calculate vehicle flow by combining base demand with time-of-day multipliers and small random variation to simulate real-world fluctuations.
+
+6. **Convert flow to speed and travel time using the BPR function**  
+   Apply the BPR flow-to-speed degradation curve using segment capacity and free-flow travel time to compute realistic average speeds, travel times, and congestion levels.
+
+7. **Export datasets to CSV for database upload**  
+   Produce structured CSV files (e.g., `road_segments.csv` and `traffic_observations.csv`) containing segment attributes and time-based traffic observations ready for upload into Supabase/PostgreSQL.

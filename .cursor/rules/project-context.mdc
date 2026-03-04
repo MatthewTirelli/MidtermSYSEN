@@ -1,0 +1,28 @@
+---
+description: Project context for MidtermSYSEN — AI-powered database pipeline
+alwaysApply: true
+---
+
+# MidtermSYSEN — Local Project Context
+
+This repo is a **SYSEN midterm**: an AI-powered database pipeline (due March 9, 2026).
+
+## Stack & Requirements
+
+- **Database**: Supabase (PostgreSQL)
+- **API**: REST API via Plumber (R) or FastAPI/Flask (Python)
+- **Dashboard**: Shiny (R) or Python dashboard app
+- **AI**: OpenAI or Ollama Cloud, using data from the database
+- **Deploy**: DigitalOcean or Posit Connect
+
+## Key Files
+
+- `MIDTERM_DL_challenge.md` — full assignment and rubric
+- `MIDTERM_DL_challenge_prompts.md` — problem to solve and prompts
+
+## Conventions for Local Work
+
+- Prefer a **narrow, working pipeline** over a large, incomplete one.
+- Ensure components connect: **database → API → dashboard → AI**.
+- Code should be reproducible; document schema, datasets, and a codebook.
+- Supabase MCP in Cursor is recommended for database work.
