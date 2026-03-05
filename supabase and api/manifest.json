@@ -6,11 +6,16 @@
     "entrypoint": "api_main:app"
   },
   "python": {
-    "version": "3.14.2",
+    "version": "3.12.4",
     "package_manager": {
       "name": "pip",
       "version": "26.0.1",
       "package_file": "requirements.txt"
+    }
+  },
+  "environment": {
+    "python": {
+      "requires": ">=3.12.4,<3.13"
     }
   },
   "files": {
