@@ -1,8 +1,12 @@
 """
-Streamlit v1: traffic visualizations from road_segments.csv and traffic_observations.csv.
-Shows driveable roads only by default. Run from repo root: streamlit run app/streamlit_app.py
+Streamlit v1: traffic visualizations from road_segments.csv and traffic_observations.csv,
+or from the Bar Harbor Traffic Report API (GET /segments, GET /observations).
+Run from repo root: streamlit run app/streamlit_app.py
+
+Set TRAFFIC_API_BASE_URL to your deployed API URL to default to the API (no code change needed).
 """
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -21,16 +25,72 @@ OUTPUT_DIR = REPO_ROOT / "data_pipeline" / "output"
 SEGMENTS_CSV = OUTPUT_DIR / "road_segments.csv"
 OBSERVATIONS_CSV = OUTPUT_DIR / "traffic_observations.csv"
 
+# Default API base URL when using "Load from API".
+# Use env TRAFFIC_API_BASE_URL when deploying the dashboard so it points at your deployed API.
+DEFAULT_API_BASE = os.environ.get("TRAFFIC_API_BASE_URL", "http://127.0.0.1:8000")
+
+
+def _fetch_from_api(base_url: str, path: str):
+    """GET JSON from API; returns None on failure."""
+    try:
+        import httpx
+        r = httpx.get(f"{base_url.rstrip('/')}/{path.lstrip('/')}", timeout=30.0)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return None
+
 
 @st.cache_data
-def load_segments():
+def load_segments(api_base: str | None = None):
+    """Load segments from API (if api_base set) or from local CSV."""
+    if api_base:
+        data = _fetch_from_api(api_base, "segments")
+        if data is not None:
+            return pd.DataFrame(data)
     return pd.read_csv(SEGMENTS_CSV)
 
 
+def _apply_bpr(observations: pd.DataFrame, segments: pd.DataFrame, alpha: float = 0.15, beta: float = 4.0) -> pd.DataFrame:
+    """BPR: t = t0 * (1 + alpha * (v/c)^beta). Adds speed_kmh and travel_time_sec to observations."""
+    seg = segments.set_index("segment_id")
+    t0_sec = (seg["length_m"] / 1000) / (seg["free_flow_speed_kmh"] / 3600)
+    cap = seg["capacity_vph"]
+    length_m = seg["length_m"]
+    out = observations.copy()
+    speed_kmh = []
+    travel_time_sec = []
+    for _, row in observations.iterrows():
+        seg_id = row["segment_id"]
+        v, c = row["flow_vph"], cap.loc[seg_id]
+        t0 = t0_sec.loc[seg_id]
+        ratio = min(v / c, 3.0) if c > 0 else 0.0
+        t_sec = t0 * (1 + alpha * (ratio**beta))
+        if np.isfinite(t_sec) and t_sec > 0:
+            speed_kmh.append((length_m.loc[seg_id] / 1000) / (t_sec / 3600))
+            travel_time_sec.append(t_sec)
+        else:
+            speed_kmh.append(np.nan)
+            travel_time_sec.append(np.nan)
+    out["speed_kmh"] = np.round(speed_kmh, 2)
+    out["travel_time_sec"] = np.round(travel_time_sec, 2)
+    return out
+
+
 @st.cache_data
-def load_observations():
+def load_observations(api_base: str | None = None):
+    """Load observations from API (if api_base set) or from local CSV. API returns BPR fields already."""
+    if api_base:
+        data = _fetch_from_api(api_base, "observations")
+        if data is not None:
+            df = pd.DataFrame(data)
+            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=False)
+            return df
     df = pd.read_csv(OBSERVATIONS_CSV)
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=False)
+    if "speed_kmh" not in df.columns:
+        segments = load_segments(api_base=None)
+        df = _apply_bpr(df, segments)
     return df
 
 
@@ -77,14 +137,40 @@ def wkt_to_lonlat_path(wkt_str):
 def main():
     st.set_page_config(page_title="Traffic dashboard", layout="wide")
     st.title("Traffic dashboard")
-    st.caption("Default dataset: Bar Harbor (from data_pipeline/input/bar_harbor.osm). Driveable roads only by default.")
+    st.caption("Data from local CSVs or the Bar Harbor Traffic Report API. Driveable roads only by default.")
 
-    if not SEGMENTS_CSV.exists() or not OBSERVATIONS_CSV.exists():
-        st.error(f"CSV files not found in {OUTPUT_DIR}. Run the data pipeline first.")
+    # Sidebar: data source (API vs local CSV)
+    # When TRAFFIC_API_BASE_URL is set (e.g. in deployed dashboard), default to using API.
+    default_use_api = bool(os.environ.get("TRAFFIC_API_BASE_URL"))
+    with st.sidebar:
+        st.markdown("### Data source")
+        use_api = st.checkbox(
+            "Load from API",
+            value=default_use_api,
+            help="Use GET /segments and GET /observations from the Bar Harbor Traffic Report API.",
+        )
+        api_base = None
+        if use_api:
+            api_base = st.text_input(
+                "API base URL",
+                value=DEFAULT_API_BASE,
+                help="e.g. http://127.0.0.1:8000 or your deployed API URL. Override with env TRAFFIC_API_BASE_URL.",
+            ).strip() or None
+            if not api_base:
+                st.warning("Enter the API base URL (e.g. http://127.0.0.1:8000).")
+                st.stop()
+        if not use_api and (not SEGMENTS_CSV.exists() or not OBSERVATIONS_CSV.exists()):
+            st.error(f"CSV files not found in {OUTPUT_DIR}. Run the data pipeline or enable 'Load from API'.")
+            st.stop()
+        st.markdown("---")
+
+    api_base = api_base if use_api else None
+    segments = load_segments(api_base=api_base)
+    observations = load_observations(api_base=api_base)
+    if segments is None or segments.empty or observations is None or observations.empty:
+        if use_api:
+            st.error("Could not load data from API. Check the URL and that the API is running.")
         st.stop()
-
-    segments = load_segments()
-    observations = load_observations()
 
     # Sidebar controls
     with st.sidebar:

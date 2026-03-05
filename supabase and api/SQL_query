@@ -1,0 +1,29 @@
+-- Used in Supabase web GUI SQL Editor to instantiate the tables before uploading the CSV files
+
+-- Road Segments
+CREATE TABLE road_segments (
+  segment_id    TEXT PRIMARY KEY,
+  geometry_wkt  TEXT,
+  length_m      NUMERIC,
+  road_class    TEXT,
+  lanes         INTEGER,
+  free_flow_speed_kmh NUMERIC,
+  capacity_vph  INTEGER,
+  am_bias       NUMERIC,
+  pm_bias       NUMERIC
+);
+
+-- Traffic Observations (raw sensor data only; speed_kmh and travel_time_sec are computed by the API via BPR)
+CREATE TABLE traffic_observations (
+  id            BIGSERIAL PRIMARY KEY,
+  segment_id    TEXT REFERENCES road_segments(segment_id),
+  timestamp     TIMESTAMPTZ,
+  flow_vph      NUMERIC
+);
+
+-- RLS policies
+ALTER TABLE road_segments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE traffic_observations ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Allow public read" ON road_segments FOR SELECT USING (true);
+CREATE POLICY "Allow public read" ON traffic_observations FOR SELECT USING (true);

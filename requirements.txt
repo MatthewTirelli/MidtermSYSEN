@@ -5,8 +5,9 @@ pandas>=2.0.0
 numpy>=1.24.0
 shapely>=2.0.0
 
-# Streamlit dashboard (v1)
+# Streamlit dashboard (v1; optional: load from API)
 streamlit>=1.28.0
+httpx>=0.26.0
 plotly>=5.18.0
 folium>=0.15.0
 streamlit-folium>=0.15.0

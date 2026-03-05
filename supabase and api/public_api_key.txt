@@ -1,0 +1,10 @@
+Supabase Publishable key: SEE EMAIL
+
+Supabase api endpoints:
+curl https://nnbhantltvdwqphzyvev.supabase.co/rest/v1/road_segments \
+  -H "apikey: replaceWithKey" \
+  -H "Authorization: Bearer replaceWithKey"
+
+  curl https://nnbhantltvdwqphzyvev.supabase.co/rest/v1/traffic_observations \
+  -H "apikey: replaceWithKey" \
+  -H "Authorization: Bearer replaceWithKey"
