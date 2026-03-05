@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "locale": "English_United States.1252",
+  "metadata": {
+    "appmode": "python-fastapi",
+    "entrypoint": "api_main:app"
+  },
+  "python": {
+    "version": "3.14.2",
+    "package_manager": {
+      "name": "pip",
+      "version": "26.0.1",
+      "package_file": "requirements.txt"
+    }
+  },
+  "files": {
+    "requirements.txt": {
+      "checksum": "bc7a9e5980cbfd2cc1944cfe6986872a"
+    },
+    ".env.example": {
+      "checksum": "86136be4fa7ba79b1a2dfd80cce1948d"
+    },
+    "README.md": {
+      "checksum": "49a8df98932ab257318f15e8f5a36e0c"
+    },
+    "SQL_query": {
+      "checksum": "3f59b4b25f0ef3e406371bd410040fbc"
+    },
+    "api/__init__.py": {
+      "checksum": "ac38b8909bac65b502b3af637cf32108"
+    },
+    "api/routers/__init__.py": {
+      "checksum": "e7cfdf1316fa9d31c62cd2064b41524c"
+    },
+    "api/routers/traffic.py": {
+      "checksum": "0636cc43e66fc5eb26be3d0fd4a23f16"
+    },
+    "api/schemas.py": {
+      "checksum": "315e1783cfb92286f3eaf43c24f2b300"
+    },
+    "api/supabase_client.py": {
+      "checksum": "dab9a2acf95ab17ff72adfc36000e177"
+    },
+    "api_main.py": {
+      "checksum": "c9ef786895a7829f27253c10f478dbb5"
+    },
+    "bpr.py": {
+      "checksum": "a1e561a94c257421f8dcf26d5bb092ee"
+    },
+    "public_api_key.txt": {
+      "checksum": "9a4e149be236d6c32174103771f8c7fd"
+    }
+  }
+}
