@@ -17,14 +17,8 @@
     "requirements.txt": {
       "checksum": "bc7a9e5980cbfd2cc1944cfe6986872a"
     },
-    ".env.example": {
-      "checksum": "86136be4fa7ba79b1a2dfd80cce1948d"
-    },
     "README.md": {
       "checksum": "49a8df98932ab257318f15e8f5a36e0c"
-    },
-    "SQL_query": {
-      "checksum": "3f59b4b25f0ef3e406371bd410040fbc"
     },
     "api/__init__.py": {
       "checksum": "ac38b8909bac65b502b3af637cf32108"
@@ -46,9 +40,6 @@
     },
     "bpr.py": {
       "checksum": "a1e561a94c257421f8dcf26d5bb092ee"
-    },
-    "public_api_key.txt": {
-      "checksum": "9a4e149be236d6c32174103771f8c7fd"
     }
   }
 }
