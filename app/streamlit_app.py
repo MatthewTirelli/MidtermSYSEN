@@ -165,6 +165,10 @@ def main():
         if not use_api and (not SEGMENTS_CSV.exists() or not OBSERVATIONS_CSV.exists()):
             st.error(f"CSV files not found in {OUTPUT_DIR}. Run the data pipeline or enable 'Load from API'.")
             st.stop()
+        if use_api:
+            if st.button("Refresh data", help="Clear cache and reload from API (e.g. after API republish)."):
+                st.cache_data.clear()
+                st.rerun()
         st.markdown("---")
 
     api_base = api_base if use_api else None
@@ -175,12 +179,14 @@ def main():
             st.error("Could not load data from API. Check the URL and that the API is running.")
         st.stop()
 
+    n_observations_loaded = len(observations)
+
     # Sidebar controls
     with st.sidebar:
         driveable_only = st.checkbox(
             "Driveable roads only",
             value=True,
-            help="Exclude footways, paths, tracks, cycleways, etc.",
+            help="Exclude footways, paths, tracks, cycleways, etc. Uncheck to show all segments (~2,300).",
         )
         st.markdown("### Congestion period")
         cong_mode = st.radio(
@@ -198,6 +204,7 @@ def main():
             ["All days", "Weekdays (Mon–Fri)", "Weekends (Sat–Sun)"],
             index=0,
         )
+    n_segments_loaded = len(segments)
     if driveable_only:
         segments = segments[segments["road_class"].astype(str).str.lower().isin(DRIVEABLE)].copy()
         seg_ids = set(segments["segment_id"])
@@ -215,18 +222,24 @@ def main():
         st.warning("No segments match the current filter.")
         st.stop()
 
-    # One row of metrics
+    # Metrics in three rows
     n_seg = len(segments)
     n_obs = len(observations)
     t_min, t_max = observations["timestamp"].min(), observations["timestamp"].max()
     avg_flow = observations["flow_vph"].mean()
     avg_speed = observations["speed_kmh"].replace(0, pd.NA).mean()
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Segments", f"{n_seg:,}")
-    c2.metric("Time range", f"{t_min.date()} → {t_max.date()}")
-    c3.metric("Avg flow (veh/h)", f"{avg_flow:.0f}")
-    c4.metric("Avg speed (km/h)", f"{avg_speed:.1f}" if pd.notna(avg_speed) else "—")
+    seg_label = f"{n_seg:,} (of {n_segments_loaded:,} loaded)" if driveable_only and n_seg != n_segments_loaded else f"{n_seg:,}"
+
+    r1a, r1b = st.columns(2)
+    r1a.metric("Segments", seg_label, help="Displayed count; when 'Driveable roads only' is on, only driveable segments are shown.")
+    r1b.metric("Total traffic observation rows pulled", f"{n_observations_loaded:,}")
+
+    st.metric("Time range", f"{t_min.date()} → {t_max.date()}")
+
+    r3a, r3b = st.columns(2)
+    r3a.metric("Avg flow (veh/h)", f"{avg_flow:.0f}")
+    r3b.metric("Avg speed (km/h)", f"{avg_speed:.1f}" if pd.notna(avg_speed) else "—")
 
     # Centre for maps: use first segment's geometry if available, else default
     map_center = [49.81, 6.42]
