@@ -1,10 +1,10 @@
-Publishable key: sb_publishable_OGPSyVdbcFeakBeRsAi9mg_r9iiu6ue
+Publishable key: SEE EMAIL
 
 api websites:
 curl https://nnbhantltvdwqphzyvev.supabase.co/rest/v1/road_segments \
-  -H "apikey: sb_publishable_OGPSyVdbcFeakBeRsAi9mg_r9iiu6ue" \
-  -H "Authorization: Bearer sb_publishable_OGPSyVdbcFeakBeRsAi9mg_r9iiu6ue"
+  -H "apikey: replaceWithKey" \
+  -H "Authorization: Bearer replaceWithKey"
 
   curl https://nnbhantltvdwqphzyvev.supabase.co/rest/v1/traffic_observations \
-  -H "apikey: sb_publishable_OGPSyVdbcFeakBeRsAi9mg_r9iiu6ue" \
-  -H "Authorization: Bearer sb_publishable_OGPSyVdbcFeakBeRsAi9mg_r9iiu6ue"
+  -H "apikey: replaceWithKey" \
+  -H "Authorization: Bearer replaceWithKey"
