@@ -48,6 +48,8 @@ uvicorn api_main:app --reload
 
 Deploy to Posit Connect (flat): `rsconnect deploy fastapi -n <server> --entrypoint api_main:app "supabase and api/"`
 
+Deployed API via Cornell Posit Server: https://connect.systems-apps.com/content/4579a545-541d-412e-93d4-b35ef9cbca66/docs
+
 ## Dashboard (`app/streamlit_app.py`)
 
 The Streamlit app visualizes congestion patterns from local CSVs or the Bar Harbor Traffic Report API.

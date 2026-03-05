@@ -26,8 +26,11 @@ SEGMENTS_CSV = OUTPUT_DIR / "road_segments.csv"
 OBSERVATIONS_CSV = OUTPUT_DIR / "traffic_observations.csv"
 
 # Default API base URL when using "Load from API".
-# Use env TRAFFIC_API_BASE_URL when deploying the dashboard so it points at your deployed API.
-DEFAULT_API_BASE = os.environ.get("TRAFFIC_API_BASE_URL", "http://127.0.0.1:8000")
+# Deployed Bar Harbor Traffic Report on Posit Connect; override with TRAFFIC_API_BASE_URL for local.
+DEFAULT_API_BASE = os.environ.get(
+    "TRAFFIC_API_BASE_URL",
+    "https://connect.systems-apps.com/content/4579a545-541d-412e-93d4-b35ef9cbca66",
+)
 
 
 def _fetch_from_api(base_url: str, path: str):
@@ -140,8 +143,8 @@ def main():
     st.caption("Data from local CSVs or the Bar Harbor Traffic Report API. Driveable roads only by default.")
 
     # Sidebar: data source (API vs local CSV)
-    # When TRAFFIC_API_BASE_URL is set (e.g. in deployed dashboard), default to using API.
-    default_use_api = bool(os.environ.get("TRAFFIC_API_BASE_URL"))
+    # Default to deployed API; set TRAFFIC_API_BASE_URL to override (e.g. localhost for dev).
+    default_use_api = True
     with st.sidebar:
         st.markdown("### Data source")
         use_api = st.checkbox(

@@ -9,6 +9,7 @@ CREATE TABLE road_segments (
   lanes         INTEGER,
   free_flow_speed_kmh NUMERIC,
   capacity_vph  INTEGER,
+  street_name   TEXT,
   am_bias       NUMERIC,
   pm_bias       NUMERIC
 );
