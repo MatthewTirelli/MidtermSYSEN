@@ -1,6 +1,6 @@
-Publishable key: SEE EMAIL
+Supabase Publishable key: SEE EMAIL
 
-api websites:
+Supabase api endpoints:
 curl https://nnbhantltvdwqphzyvev.supabase.co/rest/v1/road_segments \
   -H "apikey: replaceWithKey" \
   -H "Authorization: Bearer replaceWithKey"

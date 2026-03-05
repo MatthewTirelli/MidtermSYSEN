@@ -13,14 +13,12 @@ CREATE TABLE road_segments (
   pm_bias       NUMERIC
 );
 
--- Traffic Observations
+-- Traffic Observations (raw sensor data only; speed_kmh and travel_time_sec are computed by the API via BPR)
 CREATE TABLE traffic_observations (
   id            BIGSERIAL PRIMARY KEY,
   segment_id    TEXT REFERENCES road_segments(segment_id),
   timestamp     TIMESTAMPTZ,
-  flow_vph      NUMERIC,
-  speed_kmh     NUMERIC,
-  travel_time_sec NUMERIC
+  flow_vph      NUMERIC
 );
 
 -- RLS policies

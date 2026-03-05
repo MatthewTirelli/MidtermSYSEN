@@ -22,8 +22,10 @@ Use this pipeline when creating the CSVs that will be uploaded to Supabase.
 5. **Generate synthetic flow values for each segment over time**  
    For every `(segment, timestamp)` pair, calculate vehicle flow by combining base demand with time-of-day multipliers and small random variation to simulate real-world fluctuations.
 
+API LAYER STARTS HERE
+
 6. **Convert flow to speed and travel time using the BPR function**  
-   Apply the BPR flow-to-speed degradation curve using segment capacity and free-flow travel time to compute realistic average speeds, travel times, and congestion levels.
+   Applied in the **API layer** (Bar Harbor Traffic Report): the pipeline exports raw observations (segment_id, timestamp, flow_vph); the API fetches them from Supabase and applies the BPR curve to compute speed and travel time for `GET /observations`.
 
 7. **Export datasets to CSV for database upload**  
    Produce structured CSV files (e.g., `road_segments.csv` and `traffic_observations.csv`) containing segment attributes and time-based traffic observations ready for upload into Supabase/PostgreSQL.
