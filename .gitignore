@@ -2,5 +2,6 @@ data_pipeline/output/
 .DS_Store
 data_pipeline/.DS_Store
 .env
+venv/
 __pycache__/
 *.pyc

@@ -1,17 +1,20 @@
 """
-Streamlit v1: traffic visualizations from road_segments.csv and traffic_observations.csv,
-or from the Bar Harbor Traffic Report API (GET /segments, GET /observations).
+Bar Harbor Traffic: baseline map first, then load traffic for a chosen time window.
+Calls the Bar Harbor Traffic Report API (GET /segments, GET /observations).
 Run from repo root: streamlit run app/streamlit_app.py
-
-Set TRAFFIC_API_BASE_URL to your deployed API URL to default to the API (no code change needed).
 """
 
+import logging
 import os
+from datetime import date as date_type
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import streamlit as st
+
+# Bar Harbor, ME approximate center (lat, lon)
+BAR_HARBOR_CENTER = [44.39, -68.21]
 
 # Roads that typically allow cars (excludes footway, path, track, cycleway, etc.)
 DRIVEABLE = {
@@ -33,25 +36,47 @@ DEFAULT_API_BASE = os.environ.get(
 )
 
 
-def _fetch_from_api(base_url: str, path: str):
-    """GET JSON from API; returns None on failure."""
+def _fetch_from_api(base_url: str, path: str, params: dict | None = None):
+    """GET JSON from API. Returns (data, None) on success, (None, error_message) on failure."""
+    logger = logging.getLogger("bar_harbor_traffic")
+    url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+    logger.info("API GET %s params=%s", url, params)
     try:
         import httpx
-        r = httpx.get(f"{base_url.rstrip('/')}/{path.lstrip('/')}", timeout=30.0)
+        r = httpx.get(url, params=params, timeout=120.0)
         r.raise_for_status()
-        return r.json()
-    except Exception:
-        return None
+        data = r.json()
+        logger.info("API %s success, %s items", path, len(data) if isinstance(data, list) else "?")
+        return data, None
+    except httpx.ConnectError as e:
+        logger.error("API connect error: %s", e)
+        return None, f"Could not connect: {e}"
+    except httpx.TimeoutException as e:
+        logger.error("API timeout: %s", e)
+        return None, f"Request timed out: {e}"
+    except httpx.HTTPStatusError as e:
+        msg = f"API returned {e.response.status_code}: {e.response.text[:200] if e.response.text else ''}"
+        logger.error("API HTTP error: %s", msg)
+        return None, msg
+    except Exception as e:
+        logger.exception("API error: %s", e)
+        return None, str(e)
 
 
 @st.cache_data
 def load_segments(api_base: str | None = None):
-    """Load segments from API (if api_base set) or from local CSV."""
+    """Load segments from API (if api_base set) or from local CSV. Returns (df, error_str or None)."""
     if api_base:
-        data = _fetch_from_api(api_base, "segments")
+        data, err = _fetch_from_api(api_base, "segments")
+        if err:
+            return None, err
         if data is not None:
-            return pd.DataFrame(data)
-    return pd.read_csv(SEGMENTS_CSV)
+            return pd.DataFrame(data), None
+        return None, "No data from /segments"
+    try:
+        return pd.read_csv(SEGMENTS_CSV), None
+    except Exception as e:
+        return None, str(e)
 
 
 def _apply_bpr(observations: pd.DataFrame, segments: pd.DataFrame, alpha: float = 0.15, beta: float = 4.0) -> pd.DataFrame:
@@ -81,20 +106,45 @@ def _apply_bpr(observations: pd.DataFrame, segments: pd.DataFrame, alpha: float 
 
 
 @st.cache_data
-def load_observations(api_base: str | None = None):
-    """Load observations from API (if api_base set) or from local CSV. API returns BPR fields already."""
+def load_observations(
+    api_base: str | None = None,
+    limit: int | None = 10_000,
+    date: str | None = None,
+    start_hour: int | None = None,
+    end_hour: int | None = None,
+):
+    """Load observations from API (if api_base set) or from local CSV. API returns BPR fields already.
+    When date + start_hour + end_hour are set, only that time window is requested (e.g. 6-7pm).
+    """
     if api_base:
-        data = _fetch_from_api(api_base, "observations")
+        params = {}
+        if limit is not None:
+            params["limit"] = limit
+        if date:
+            params["date"] = date
+        if start_hour is not None and end_hour is not None:
+            params["start_hour"] = start_hour
+            params["end_hour"] = end_hour
+        data, err = _fetch_from_api(api_base, "observations", params=params if params else None)
+        if err:
+            return None, err
         if data is not None:
             df = pd.DataFrame(data)
             df["timestamp"] = pd.to_datetime(df["timestamp"], utc=False)
-            return df
-    df = pd.read_csv(OBSERVATIONS_CSV)
-    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=False)
-    if "speed_kmh" not in df.columns:
-        segments = load_segments(api_base=None)
-        df = _apply_bpr(df, segments)
-    return df
+            return df, None
+        return None, "No data from /observations"
+    if not OBSERVATIONS_CSV.exists():
+        return None, "CSV not found"
+    try:
+        df = pd.read_csv(OBSERVATIONS_CSV)
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=False)
+        if "speed_kmh" not in df.columns:
+            segments, _ = load_segments(api_base=None)
+            if segments is not None:
+                df = _apply_bpr(df, segments)
+        return df, None
+    except Exception as e:
+        return None, str(e)
 
 
 def wkt_to_latlon_pairs(wkt_str):
@@ -137,202 +187,196 @@ def wkt_to_lonlat_path(wkt_str):
     return None
 
 
-def main():
-    st.set_page_config(page_title="Traffic dashboard", layout="wide")
-    st.title("Traffic dashboard")
-    st.caption("Data from local CSVs or the Bar Harbor Traffic Report API. Driveable roads only by default.")
+def _setup_logging():
+    """Configure logging and in-memory buffer for UI."""
+    if "log_buffer" not in st.session_state:
+        st.session_state["log_buffer"] = []
 
-    # Sidebar: data source (API vs local CSV)
-    # Default to deployed API; set TRAFFIC_API_BASE_URL to override (e.g. localhost for dev).
-    default_use_api = True
+    class BufferHandler(logging.Handler):
+        def emit(self, record):
+            st.session_state["log_buffer"].append(self.format(record))
+            if len(st.session_state["log_buffer"]) > 100:
+                st.session_state["log_buffer"] = st.session_state["log_buffer"][-100:]
+
+    log = logging.getLogger("bar_harbor_traffic")
+    if not log.handlers:
+        log.setLevel(logging.DEBUG)
+        h = BufferHandler()
+        h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        log.addHandler(h)
+    return log
+
+
+def main():
+    st.set_page_config(page_title="Bar Harbor Traffic", layout="wide")
+    log = _setup_logging()
+
+    st.title("Bar Harbor Traffic")
+    st.caption("Pick a date and time range, then click **Show traffic for this time** to load congestion for that window.")
+
+    # Session state for traffic data (phase 2)
+    if "traffic_obs" not in st.session_state:
+        st.session_state["traffic_obs"] = None
+    if "traffic_err" not in st.session_state:
+        st.session_state["traffic_err"] = None
+    if "traffic_params" not in st.session_state:
+        st.session_state["traffic_params"] = None
+
+    # Sidebar: API only (plan: baseline map from API, traffic on demand)
     with st.sidebar:
-        st.markdown("### Data source")
-        use_api = st.checkbox(
-            "Load from API",
-            value=default_use_api,
-            help="Use GET /segments and GET /observations from the Bar Harbor Traffic Report API.",
-        )
-        api_base = None
-        if use_api:
-            api_base = st.text_input(
-                "API base URL",
-                value=DEFAULT_API_BASE,
-                help="e.g. http://127.0.0.1:8000 or your deployed API URL. Override with env TRAFFIC_API_BASE_URL.",
-            ).strip() or None
-            if not api_base:
-                st.warning("Enter the API base URL (e.g. http://127.0.0.1:8000).")
-                st.stop()
-        if not use_api and (not SEGMENTS_CSV.exists() or not OBSERVATIONS_CSV.exists()):
-            st.error(f"CSV files not found in {OUTPUT_DIR}. Run the data pipeline or enable 'Load from API'.")
+        st.markdown("### Bar Harbor Traffic API")
+        api_base = st.text_input(
+            "API base URL",
+            value=DEFAULT_API_BASE,
+            help="Bar Harbor Traffic Report API (GET /segments, GET /observations).",
+        ).strip() or None
+        if not api_base:
+            st.warning("Enter the API base URL.")
             st.stop()
-        if use_api:
-            if st.button("Refresh data", help="Clear cache and reload from API (e.g. after API republish)."):
-                st.cache_data.clear()
-                st.rerun()
+
+        st.markdown("### Time window")
+        selected_date = st.date_input("Date", value=date_type(2025, 3, 3))
+        start_hour = st.selectbox("Start hour", range(24), index=18, format_func=lambda h: f"{h}:00")
+        end_hour = st.selectbox("End hour", range(24), index=19, format_func=lambda h: f"{h}:00")
+        day_name = selected_date.strftime("%A")
+        st.caption(f"Day: **{day_name}**")
+
+        show_traffic_clicked = st.button("Show traffic for this time", type="primary")
+        driveable_only = st.checkbox("Driveable roads only", value=True, help="Exclude footways, paths, etc.")
+        if st.button("Clear cache"):
+            st.cache_data.clear()
+            st.session_state["traffic_obs"] = None
+            st.session_state["traffic_err"] = None
+            st.session_state["traffic_params"] = None
+            st.rerun()
         st.markdown("---")
 
-    api_base = api_base if use_api else None
-    segments = load_segments(api_base=api_base)
-    observations = load_observations(api_base=api_base)
-    if segments is None or segments.empty or observations is None or observations.empty:
-        if use_api:
-            st.error("Could not load data from API. Check the URL and that the API is running.")
+    # Phase 1: Load segments only (baseline map)
+    log.info("Fetching segments from API")
+    segments, seg_err = load_segments(api_base=api_base)
+    if segments is None or segments.empty:
+        err_msg = seg_err or "Could not load road segments."
+        log.error(err_msg)
+        st.error("Could not load road network. " + err_msg)
+        with st.expander("Error details / logs"):
+            st.text("\n".join(st.session_state.get("log_buffer", [])[-30:]))
         st.stop()
+    log.info("Segments loaded: %s", len(segments))
 
-    n_observations_loaded = len(observations)
-
-    # Sidebar controls
-    with st.sidebar:
-        driveable_only = st.checkbox(
-            "Driveable roads only",
-            value=True,
-            help="Exclude footways, paths, tracks, cycleways, etc. Uncheck to show all segments (~2,300).",
-        )
-        st.markdown("### Congestion period")
-        cong_mode = st.radio(
-            "Display congestion for",
-            ["All times", "Specific hour"],
-            index=0,
-            help="Use a specific hour-of-day to see peak vs off-peak congestion.",
-        )
-        cong_hour = None
-        if cong_mode == "Specific hour":
-            cong_hour = st.slider("Hour of day", 0, 23, 8)
-        st.markdown("### Days included")
-        day_filter = st.radio(
-            "Include data from",
-            ["All days", "Weekdays (Mon–Fri)", "Weekends (Sat–Sun)"],
-            index=0,
-        )
     n_segments_loaded = len(segments)
     if driveable_only:
         segments = segments[segments["road_class"].astype(str).str.lower().isin(DRIVEABLE)].copy()
-        seg_ids = set(segments["segment_id"])
-        observations = observations[observations["segment_id"].isin(seg_ids)].copy()
-
-    # Optional day-of-week filter (applies to all downstream charts and congestion map)
-    if day_filter != "All days":
-        dow = observations["timestamp"].dt.dayofweek
-        if day_filter.startswith("Weekdays"):
-            observations = observations[dow < 5].copy()
-        elif day_filter.startswith("Weekends"):
-            observations = observations[dow >= 5].copy()
-
     if segments.empty:
-        st.warning("No segments match the current filter.")
+        st.warning("No driveable segments.")
         st.stop()
 
-    # Metrics in three rows
-    n_seg = len(segments)
-    n_obs = len(observations)
-    t_min, t_max = observations["timestamp"].min(), observations["timestamp"].max()
-    avg_flow = observations["flow_vph"].mean()
-    avg_speed = observations["speed_kmh"].replace(0, pd.NA).mean()
-
-    seg_label = f"{n_seg:,} (of {n_segments_loaded:,} loaded)" if driveable_only and n_seg != n_segments_loaded else f"{n_seg:,}"
-
-    r1a, r1b = st.columns(2)
-    r1a.metric("Segments", seg_label, help="Displayed count; when 'Driveable roads only' is on, only driveable segments are shown.")
-    r1b.metric("Total traffic observation rows pulled", f"{n_observations_loaded:,}")
-
-    st.metric("Time range", f"{t_min.date()} → {t_max.date()}")
-
-    r3a, r3b = st.columns(2)
-    r3a.metric("Avg flow (veh/h)", f"{avg_flow:.0f}")
-    r3b.metric("Avg speed (km/h)", f"{avg_speed:.1f}" if pd.notna(avg_speed) else "—")
-
-    # Centre for maps: use first segment's geometry if available, else default
-    map_center = [49.81, 6.42]
+    # Map center: Bar Harbor default, or from first segment
+    map_center = list(BAR_HARBOR_CENTER)
     for _, row in segments.head(1).iterrows():
         coords = wkt_to_latlon_pairs(row.get("geometry_wkt"))
         if coords:
             map_center = [coords[0][0], coords[0][1]]
             break
 
-    # Congestion map: segments colored by v/c (mean flow / capacity) on a global scale for the current view
-    st.subheader("Congestion map")
-    seg_stats = observations.copy()
-    if cong_hour is not None:
-        seg_stats["hour"] = seg_stats["timestamp"].dt.hour
-        seg_stats = seg_stats[seg_stats["hour"] == cong_hour]
-    mean_flow_by_seg = seg_stats.groupby("segment_id").agg(mean_flow_vph=("flow_vph", "mean")).reset_index()
-    segments_with_vc = segments.merge(mean_flow_by_seg, on="segment_id", how="left")
-    segments_with_vc["mean_flow_vph"] = segments_with_vc["mean_flow_vph"].fillna(0.0)
-    cap = segments_with_vc["capacity_vph"]
-    segments_with_vc["vc_ratio"] = np.where(
-        (cap > 0) & cap.notna(),
-        segments_with_vc["mean_flow_vph"] / cap,
-        np.nan,
-    )
-
-    # Show all (driveable) roads that are counted; use pydeck for performance.
-    seg_for_congestion = segments_with_vc.copy()
-    seg_for_congestion["path"] = seg_for_congestion["geometry_wkt"].map(wkt_to_lonlat_path)
-    seg_for_congestion = seg_for_congestion[seg_for_congestion["path"].notna()].copy()
-
-    # Use global v/c over the entire day (after day-of-week filter, before hour filter)
-    # to define color bands, so off-peak hours naturally appear less congested.
-    obs_cap = observations.merge(
-        segments[["segment_id", "capacity_vph"]],
-        on="segment_id",
-        how="left",
-    )
-    obs_cap["vc_ratio_all"] = np.where(
-        (obs_cap["capacity_vph"] > 0) & obs_cap["capacity_vph"].notna(),
-        obs_cap["flow_vph"] / obs_cap["capacity_vph"],
-        np.nan,
-    )
-    vc_vals = obs_cap["vc_ratio_all"].replace([np.inf, -np.inf], np.nan).dropna()
-    if len(vc_vals) >= 8:
-        q10, q30, q50, q65, q80, q90, q97 = np.quantile(
-            vc_vals, [0.10, 0.30, 0.50, 0.65, 0.80, 0.90, 0.97]
+    # Fetch observations when user clicks "Show traffic"
+    obs_date = selected_date.strftime("%Y-%m-%d")
+    if show_traffic_clicked:
+        log.info("Fetching observations: date=%s %s-%s", obs_date, start_hour, end_hour)
+        observations, obs_err = load_observations(
+            api_base=api_base,
+            limit=10_000,
+            date=obs_date,
+            start_hour=start_hour,
+            end_hour=end_hour,
         )
-    elif len(vc_vals) > 0:
-        vmax = vc_vals.max()
-        q10, q30, q50, q65, q80, q90, q97 = (
-            0.10 * vmax,
-            0.30 * vmax,
-            0.50 * vmax,
-            0.65 * vmax,
-            0.80 * vmax,
-            0.90 * vmax,
-            0.97 * vmax,
+        st.session_state["traffic_obs"] = observations
+        st.session_state["traffic_err"] = obs_err
+        st.session_state["traffic_params"] = (obs_date, start_hour, end_hour)
+        if obs_err:
+            log.error("Observations error: %s", obs_err)
+        elif observations is not None and not observations.empty:
+            log.info("Observations loaded: %s rows", len(observations))
+        st.rerun()
+
+    observations = st.session_state["traffic_obs"]
+    traffic_params = st.session_state["traffic_params"]
+    traffic_err = st.session_state["traffic_err"]
+
+    # Baseline map (gray) or traffic overlay (colored by v/c)
+    seg_for_map = segments.copy()
+    seg_for_map["path"] = seg_for_map["geometry_wkt"].map(wkt_to_lonlat_path)
+    seg_for_map = seg_for_map[seg_for_map["path"].notna()].copy()
+
+    if observations is not None and not observations.empty and traffic_params == (obs_date, start_hour, end_hour):
+        # Color by v/c for this window only
+        seg_stats = observations.groupby("segment_id").agg(mean_flow_vph=("flow_vph", "mean")).reset_index()
+        seg_for_map = seg_for_map.merge(seg_stats, on="segment_id", how="left")
+        seg_for_map["mean_flow_vph"] = seg_for_map["mean_flow_vph"].fillna(0.0)
+        cap = seg_for_map["capacity_vph"]
+        seg_for_map["vc_ratio"] = np.where(
+            (cap > 0) & cap.notna(),
+            seg_for_map["mean_flow_vph"] / cap,
+            np.nan,
         )
+        obs_cap = observations.merge(segments[["segment_id", "capacity_vph"]], on="segment_id", how="left")
+        obs_cap["vc_ratio_all"] = np.where(
+            (obs_cap["capacity_vph"] > 0) & obs_cap["capacity_vph"].notna(),
+            obs_cap["flow_vph"] / obs_cap["capacity_vph"],
+            np.nan,
+        )
+        vc_vals = obs_cap["vc_ratio_all"].replace([np.inf, -np.inf], np.nan).dropna()
+        if len(vc_vals) >= 8:
+            q10, q30, q50, q65, q80, q90, q97 = np.quantile(vc_vals, [0.10, 0.30, 0.50, 0.65, 0.80, 0.90, 0.97])
+        elif len(vc_vals) > 0:
+            vmax = vc_vals.max()
+            q10, q30, q50, q65, q80, q90, q97 = 0.10 * vmax, 0.30 * vmax, 0.50 * vmax, 0.65 * vmax, 0.80 * vmax, 0.90 * vmax, 0.97 * vmax
+        else:
+            q10 = q30 = q50 = q65 = q80 = q90 = q97 = 0.0
+
+        def congestion_color(vc):
+            if pd.isna(vc):
+                return [180, 180, 180]
+            if vc < q10:
+                return [0, 70, 0]
+            if vc < q30:
+                return [0, 120, 0]
+            if vc < q50:
+                return [0, 170, 0]
+            if vc < q65:
+                return [173, 255, 47]
+            if vc < q80:
+                return [255, 215, 0]
+            if vc < q90:
+                return [255, 180, 0]
+            if vc < q97:
+                return [255, 140, 0]
+            return [220, 20, 20]
+
+        seg_for_map["color"] = seg_for_map["vc_ratio"].map(congestion_color)
+        map_title = "Traffic (congestion) map"
+        map_caption = f"Window: {day_name} {obs_date} {start_hour}:00–{end_hour}:00. Green = low congestion, red = high."
     else:
-        q10 = q30 = q50 = q65 = q80 = q90 = q97 = 0.0
+        seg_for_map["color"] = [[180, 180, 180]] * len(seg_for_map)
+        map_title = "Bar Harbor road network (baseline)"
+        map_caption = "Pick a date and time range, then click **Show traffic for this time** to load congestion."
+        if traffic_err:
+            st.error("Could not load traffic. " + traffic_err)
 
-    def congestion_color(vc):
-        """Map global v/c to RGB using quantile bands for the current view."""
-        if pd.isna(vc):
-            return [180, 180, 180]  # gray
-        v = vc
-        if v < q10:
-            return [0, 70, 0]       # very dark green (lowest flows)
-        if v < q30:
-            return [0, 120, 0]      # dark green
-        if v < q50:
-            return [0, 170, 0]      # green
-        if v < q65:
-            return [173, 255, 47]   # yellow‑green
-        if v < q80:
-            return [255, 215, 0]    # yellow
-        if v < q90:
-            return [255, 180, 0]    # yellow‑orange
-        if v < q97:
-            return [255, 140, 0]    # orange
-        return [220, 20, 20]        # strong red (top few percent of v/c)
+    st.subheader(map_title)
+    st.caption(map_caption)
 
-    seg_for_congestion["color"] = seg_for_congestion["vc_ratio"].map(congestion_color)
+    # Legend (when showing traffic)
+    if observations is not None and not observations.empty and traffic_params == (obs_date, start_hour, end_hour):
+        st.markdown(
+            "**Legend:** Low congestion (green) → High congestion (red)  |  "
+            "Gray = no data for this segment in the selected window."
+        )
 
-    st.caption(
-        "Colors are based on global v/c for the current hour and day filter. Dark greens are the lowest flows in the "
-        "city, yellows are moderate, and orange/red highlight the highest-flow corridors (top quantiles) across the city."
-    )
     try:
         import pydeck as pdk
         layer = pdk.Layer(
             "PathLayer",
-            data=seg_for_congestion,
+            data=seg_for_map,
             get_path="path",
             get_color="color",
             width_scale=10,
@@ -340,92 +384,29 @@ def main():
             get_width=2,
             pickable=True,
         )
-        view_state = pdk.ViewState(
-            latitude=map_center[0],
-            longitude=map_center[1],
-            zoom=13.5,
-        )
-        tooltip = {
-            "text": "name={street_name}\nseg={segment_id}\nclass={road_class}\nv/c={vc_ratio:.2f}\nmean_flow={mean_flow_vph:.0f}"
-        }
+        view_state = pdk.ViewState(latitude=map_center[0], longitude=map_center[1], zoom=13.5)
+        tooltip = {"text": "name={street_name}\nseg={segment_id}\nclass={road_class}\nv/c={vc_ratio:.2f}\nmean_flow={mean_flow_vph:.0f}"} if "vc_ratio" in seg_for_map.columns else {"text": "name={street_name}\nseg={segment_id}\nclass={road_class}"}
         deck = pdk.Deck(layers=[layer], initial_view_state=view_state, tooltip=tooltip)
         st.pydeck_chart(deck, width="stretch", height=420)
-    except Exception:
-        st.warning("pydeck failed to render the congestion map. (Streamlit includes pydeck by default.)")
+    except Exception as e:
+        log.exception("pydeck failed")
+        st.warning("Map could not be rendered. " + str(e))
 
-    # Single time series: flow and speed on one chart (two lines)
-    st.subheader("Traffic over time")
-    agg = observations.groupby("timestamp").agg(flow_vph=("flow_vph", "mean"), speed_kmh=("speed_kmh", "mean")).reset_index()
-    agg["speed_kmh"] = agg["speed_kmh"].replace(0, pd.NA)
+    # Summary metrics when traffic is loaded
+    if observations is not None and not observations.empty and traffic_params == (obs_date, start_hour, end_hour):
+        n_obs = len(observations)
+        avg_flow = observations["flow_vph"].mean()
+        avg_speed = observations["speed_kmh"].replace(0, pd.NA).mean()
+        st.metric("Segments shown", f"{len(seg_for_map):,}")
+        st.metric("Observations in window", f"{n_obs:,}")
+        st.metric("Avg flow (veh/h)", f"{avg_flow:.0f}")
+        st.metric("Avg speed (km/h)", f"{avg_speed:.1f}" if pd.notna(avg_speed) else "—")
 
-    try:
-        import plotly.express as px
-        import plotly.graph_objects as go
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=agg["timestamp"], y=agg["flow_vph"], name="Flow (veh/h)", yaxis="y"))
-        fig.add_trace(go.Scatter(x=agg["timestamp"], y=agg["speed_kmh"], name="Speed (km/h)", yaxis="y2"))
-        fig.update_layout(
-            height=300,
-            margin=dict(l=20, r=20, t=20, b=20),
-            yaxis=dict(title="Flow (veh/h)"),
-            yaxis2=dict(title="Speed (km/h)", overlaying="y", side="right"),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02),
-        )
-        st.plotly_chart(fig, width="stretch")
-    except ImportError:
-        st.line_chart(agg.set_index("timestamp")[["flow_vph", "speed_kmh"]])
-
-    # Segment ranking (prioritization): top N by flow × length
-    st.subheader("Segment ranking (prioritization)")
-    mean_flow = observations.groupby("segment_id")["flow_vph"].mean().reset_index()
-    mean_flow.columns = ["segment_id", "mean_flow_vph"]
-    ranking = segments.merge(mean_flow, on="segment_id", how="left")
-    ranking["mean_flow_vph"] = ranking["mean_flow_vph"].fillna(0)
-    ranking["score"] = ranking["mean_flow_vph"] * ranking["length_m"]
-    ranking = ranking.sort_values("score", ascending=False).head(30).reset_index(drop=True)
-    ranking["rank"] = range(1, len(ranking) + 1)
-    display_rank = ranking[["rank", "segment_id", "street_name", "road_class", "length_m", "mean_flow_vph", "score"]].copy()
-    display_rank["length_m"] = display_rank["length_m"].round(1)
-    display_rank["mean_flow_vph"] = display_rank["mean_flow_vph"].round(0)
-    display_rank["score"] = display_rank["score"].round(0)
-    st.caption("Top segments by flow × length (vehicle-miles proxy). Use for investment or congestion focus.")
-    st.dataframe(display_rank, width="stretch", hide_index=True)
-
-    # Hourly profile: mean flow and speed by hour of day
-    st.subheader("Hourly profile")
-    obs_hour = observations.copy()
-    obs_hour["hour"] = obs_hour["timestamp"].dt.hour
-    obs_hour["speed_kmh"] = obs_hour["speed_kmh"].replace(0, pd.NA)
-    hourly = obs_hour.groupby("hour").agg(flow_vph=("flow_vph", "mean"), speed_kmh=("speed_kmh", "mean")).reset_index()
-    hourly = hourly.set_index("hour").reindex(range(24)).reset_index()
-    hourly["flow_vph"] = hourly["flow_vph"].fillna(0)
-    try:
-        import plotly.graph_objects as go
-        fig_h = go.Figure()
-        fig_h.add_trace(go.Scatter(x=hourly["hour"], y=hourly["flow_vph"], name="Flow (veh/h)", yaxis="y"))
-        fig_h.add_trace(go.Scatter(x=hourly["hour"], y=hourly["speed_kmh"], name="Speed (km/h)", yaxis="y2"))
-        fig_h.update_layout(
-            height=300,
-            margin=dict(l=20, r=20, t=20, b=20),
-            xaxis=dict(title="Hour of day"),
-            yaxis=dict(title="Mean flow (veh/h)"),
-            yaxis2=dict(title="Mean speed (km/h)", overlaying="y", side="right"),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02),
-        )
-        st.plotly_chart(fig_h, width="stretch")
-    except ImportError:
-        st.line_chart(hourly.set_index("hour")[["flow_vph", "speed_kmh"]])
-
-    # One bar chart: segments by road class
-    st.subheader("Segments by road class")
-    by_class = segments.groupby("road_class").agg(n=("segment_id", "count")).reset_index().sort_values("n", ascending=False)
-    try:
-        import plotly.express as px
-        fig = px.bar(by_class, x="road_class", y="n", title="")
-        fig.update_layout(height=280, margin=dict(l=20, r=20, t=20, b=80), xaxis_tickangle=-45, showlegend=False)
-        st.plotly_chart(fig, width="stretch")
-    except ImportError:
-        st.bar_chart(by_class.set_index("road_class"))
+    # Error details / logs expander
+    with st.expander("Error details / logs"):
+        if traffic_err:
+            st.error(traffic_err)
+        st.text("\n".join(st.session_state.get("log_buffer", [])[-30:]))
 
 
 if __name__ == "__main__":
