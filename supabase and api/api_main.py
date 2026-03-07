@@ -5,8 +5,8 @@ from fastapi import FastAPI
 
 from api.routers import traffic
 
-# Load .env from project root so SUPABASE_URL and SUPABASE_ANON_KEY are set
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+# Load .env from this directory (supabase and api/) so SUPABASE_URL and SUPABASE_ANON_KEY are set
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 
 def create_app() -> FastAPI:
