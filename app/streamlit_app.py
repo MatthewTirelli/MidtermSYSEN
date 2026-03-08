@@ -8,6 +8,7 @@ import logging
 import os
 from datetime import date as date_type
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -36,7 +37,7 @@ DEFAULT_API_BASE = os.environ.get(
 )
 
 
-def _fetch_from_api(base_url: str, path: str, params: dict | None = None):
+def _fetch_from_api(base_url: str, path: str, params: Optional[dict] = None):
     """GET JSON from API. Returns (data, None) on success, (None, error_message) on failure."""
     logger = logging.getLogger("bar_harbor_traffic")
     url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
@@ -64,7 +65,7 @@ def _fetch_from_api(base_url: str, path: str, params: dict | None = None):
 
 
 @st.cache_data
-def load_segments(api_base: str | None = None):
+def load_segments(api_base: Optional[str] = None):
     """Load segments from API (if api_base set) or from local CSV. Returns (df, error_str or None)."""
     if api_base:
         data, err = _fetch_from_api(api_base, "segments")
@@ -107,11 +108,11 @@ def _apply_bpr(observations: pd.DataFrame, segments: pd.DataFrame, alpha: float 
 
 @st.cache_data
 def load_observations(
-    api_base: str | None = None,
-    limit: int | None = 10_000,
-    date: str | None = None,
-    start_hour: int | None = None,
-    end_hour: int | None = None,
+    api_base: Optional[str] = None,
+    limit: Optional[int] = 10_000,
+    date: Optional[str] = None,
+    start_hour: Optional[int] = None,
+    end_hour: Optional[int] = None,
 ):
     """Load observations from API (if api_base set) or from local CSV. API returns BPR fields already.
     When date + start_hour + end_hour are set, only that time window is requested (e.g. 6-7pm).
@@ -387,7 +388,7 @@ def main():
         view_state = pdk.ViewState(latitude=map_center[0], longitude=map_center[1], zoom=13.5)
         tooltip = {"text": "name={street_name}\nseg={segment_id}\nclass={road_class}\nv/c={vc_ratio:.2f}\nmean_flow={mean_flow_vph:.0f}"} if "vc_ratio" in seg_for_map.columns else {"text": "name={street_name}\nseg={segment_id}\nclass={road_class}"}
         deck = pdk.Deck(layers=[layer], initial_view_state=view_state, tooltip=tooltip)
-        st.pydeck_chart(deck, width="stretch", height=420)
+        st.pydeck_chart(deck, height=420)
     except Exception as e:
         log.exception("pydeck failed")
         st.warning("Map could not be rendered. " + str(e))
