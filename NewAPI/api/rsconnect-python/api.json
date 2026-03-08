@@ -1,0 +1,12 @@
+{
+    "https://connect.systems-apps.com": {
+        "server_url": "https://connect.systems-apps.com",
+        "filename": "/Users/mjt/Desktop/MidtermSYSEN/NewAPI/api",
+        "app_url": "https://connect.systems-apps.com/content/ac3cdefe-f3cc-43b8-86fd-7f212e7263d2/",
+        "app_id": "112",
+        "app_guid": "ac3cdefe-f3cc-43b8-86fd-7f212e7263d2",
+        "title": "api",
+        "app_mode": "python-fastapi",
+        "app_store_version": 1
+    }
+}

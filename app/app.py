@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 from datetime import date as date_type
 from pathlib import Path
 from typing import Any, List, Optional
@@ -26,7 +27,8 @@ try:
 except ImportError:
     pass
 
-from api_client import fetch_observations, fetch_segments
+from api_client import fetch_segments, fetch_traffic_window
+from llm_cloud import OllamaCloudError, query_llm
 from map_utils import (
     BAR_HARBOR_CENTER_LAT,
     BAR_HARBOR_CENTER_LON,
@@ -35,27 +37,50 @@ from map_utils import (
     vc_to_color,
 )
 
+# Ollama Cloud: no local server. API key and model come from llm_cloud (OLLAMA_API_KEY, OLLAMA_MODEL).
+
 DRIVEABLE = {
     "motorway", "trunk", "primary", "secondary", "tertiary",
     "residential", "unclassified", "service", "living_street",
     "motorway_link", "trunk_link", "primary_link", "secondary_link", "tertiary_link",
 }
 
-DEFAULT_API_BASE = os.environ.get(
-    "TRAFFIC_API_BASE_URL",
-    "https://connect.systems-apps.com/content/4579a545-541d-412e-93d4-b35ef9cbca66",
-)
-
-PORT = 11434
-OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", f"http://localhost:{PORT}").rstrip("/")
-OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY", "").strip() or None
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "smollm2:1.7b")
-OLLAMA_TIMEOUT = 90
+DEFAULT_API_BASE = "https://connect.systems-apps.com/content/ac3cdefe-f3cc-43b8-86fd-7f212e7263d2"
 
 ZOOM_LOCATIONS = {
     "Bar Harbor (overview)": (BAR_HARBOR_CENTER_LAT, BAR_HARBOR_CENTER_LON, 12),
     "Downtown Bar Harbor": (44.392, -68.204, 15),
 }
+
+
+def sanitize_report_text(raw: str) -> str:
+    """
+    Post-process LLM output so it reads as plain report text, not markdown.
+    Strips markdown artifacts, normalizes punctuation, and collapses excess whitespace.
+    """
+    if not raw or not isinstance(raw, str):
+        return (raw or "").strip()
+    s = raw
+    # Remove markdown bold/italic: **text** and __text__
+    s = re.sub(r"\*\*([^*]*)\*\*", r"\1", s)
+    s = re.sub(r"__([^_]*)__", r"\1", s)
+    # Remove leading markdown headers (# ## ###) and optional space after
+    s = re.sub(r"^#{1,6}\s*", "", s, flags=re.MULTILINE)
+    # Remove backticks (inline code)
+    s = s.replace("`", "")
+    # Normalize common unicode punctuation to ASCII-style where it looks awkward
+    s = s.replace("\u2013", "-").replace("\u2014", "-")  # en dash, em dash -> hyphen
+    s = s.replace("\u2018", "'").replace("\u2019", "'")   # smart single quotes
+    s = s.replace("\u201c", '"').replace("\u201d", '"')   # smart double quotes
+    # Collapse 3+ newlines to at most 2 (one blank line)
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    # Trim each line and drop leading/trailing blank lines
+    lines = [line.rstrip() for line in s.splitlines()]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return "\n".join(lines).strip()
 
 
 def make_deck(map_df: pd.DataFrame, view_lat: float, view_lon: float, view_zoom: float, daily_mode: bool = False) -> pdk.Deck:
@@ -78,28 +103,6 @@ def make_deck(map_df: pd.DataFrame, view_lat: float, view_lon: float, view_zoom:
     if "tooltip_speed" not in map_df.columns:
         tooltip = {"html": "<b>{street_name}</b><br/>Segment: {segment_id}", "style": {"backgroundColor": "white"}}
     return pdk.Deck(layers=[layer], initial_view_state=view, tooltip=tooltip, map_style="light", map_provider="carto")
-
-
-def _call_ollama(user_prompt: str, system_prompt: Optional[str] = None) -> str:
-    """Call Ollama /api/generate. Returns generated text or raises on failure."""
-    full_prompt = user_prompt
-    if system_prompt:
-        full_prompt = f"{system_prompt}\n\n{user_prompt}"
-    body = {"model": OLLAMA_MODEL, "prompt": full_prompt, "stream": False}
-    headers = {}
-    if OLLAMA_API_KEY:
-        headers["Authorization"] = f"Bearer {OLLAMA_API_KEY}"
-    r = httpx.post(
-        f"{OLLAMA_BASE_URL}/api/generate",
-        json=body,
-        headers=headers or None,
-        timeout=OLLAMA_TIMEOUT,
-    )
-    r.raise_for_status()
-    data = r.json()
-    if isinstance(data.get("error"), str):
-        raise RuntimeError(data["error"])
-    return (data.get("response") or "").strip()
 
 
 def _map_error_html(height: int, message: str = "Map could not be generated.") -> str:
@@ -221,7 +224,7 @@ app_ui = ui.page_fluid(
                 ui.panel_conditional("input.data_mode === 'daily'", ui.column(8, ui.div({"class": "dashboard-card"}, ui.tags.h5("Time of day profile"), ui.output_ui("plotly_ui")))),
             ),
             ui.row(
-                ui.column(12, ui.div({"class": "dashboard-card"}, ui.tags.h5("Worst segments"), ui.output_ui("table_ui"))),
+                ui.column(12, ui.div({"class": "dashboard-card"}, ui.tags.h5("Most Congested Roads"), ui.output_ui("table_ui"))),
             ),
             ui.row(
                 ui.column(12, ui.div({"class": "dashboard-card"}, ui.tags.h5("AI Analysis"), ui.input_action_button("ai_analysis_btn", "Generate AI summary", class_="btn-primary mb-2"), ui.output_ui("ai_summary_ui"))),
@@ -235,6 +238,7 @@ app_ui = ui.page_fluid(
 def server(input, output, session):
     segments_df = reactive.Value(None)
     observations_df = reactive.Value(None)
+    window_stats_df = reactive.Value(None)
     loading = reactive.Value(False)
     loading_message = reactive.Value("")
     api_error = reactive.Value(None)
@@ -260,18 +264,26 @@ def server(input, output, session):
             return
         api_error.set(None)
         date_val = input.date()
-        date_str = date_val.isoformat() if date_val and hasattr(date_val, "isoformat") else (str(date_val)[:10] if date_val else "2025-03-04")
+        if date_val is not None and hasattr(date_val, "isoformat"):
+            date_str = date_val.isoformat()
+        elif date_val is not None:
+            date_str = str(date_val).strip()[:10]
+        else:
+            date_str = "2025-03-04"
+        if len(date_str) != 10 or date_str[4] != "-" or date_str[7] != "-":
+            date_str = "2025-03-04"
         mode = (input.data_mode() or "hourly").strip().lower()
         if mode == "daily":
             start_hour, end_hour = 0, 23
         else:
             try:
                 h = input.hour()
-                start_hour = end_hour = int(h) if h is not None else 18
+                start_hour = int(h) if h is not None else 18
+                end_hour = start_hour + 1
             except (TypeError, ValueError):
-                start_hour, end_hour = 18, 18
-        # Debug: API query parameters
-        print(f"[Congestion] API query: date={date_str}, start_hour={start_hour}, end_hour={end_hour}, data_mode={mode}")
+                start_hour, end_hour = 18, 19
+        # Debug: API query parameters (check terminal to confirm date changes when you pick a new day)
+        print(f"[Congestion] API query: date={date_str!r}, start_hour={start_hour}, end_hour={end_hour}, data_mode={mode}")
         with ui.Progress(min=0, max=1, session=session) as p:
             p.set(0, message="Loading traffic data…", detail="Step 1 of 2: Fetching road segments")
             seg, err, _, _ = fetch_segments(api_base)
@@ -279,24 +291,61 @@ def server(input, output, session):
                 api_error.set(err)
                 segments_df.set(None)
                 observations_df.set(None)
+                window_stats_df.set(None)
                 loading.set(False)
                 loading_message.set("")
                 return
             if input.driveable_only():
                 seg = seg[seg["road_class"].astype(str).str.lower().isin(DRIVEABLE)]
             segments_df.set(seg)
-            p.set(0.5, message="Loading traffic data…", detail="Step 2 of 2: Fetching observations")
-            loading_message.set("Fetching traffic observations…")
-            obs, err2, _, _ = fetch_observations(api_base, limit=10_000, date=date_str, start_hour=start_hour, end_hour=end_hour)
-            if err2:
-                api_error.set(err2)
-                observations_df.set(None)
+            if mode == "daily":
+                # Daily: fetch one window per hour (0-1, 1-2, ..., 22-23) so we can compute peak congestion hour
+                p.set(0.5, message="Loading traffic data…", detail=f"Step 2 of 2: Fetching hourly windows for {date_str}…")
+                loading_message.set(f"Fetching hourly windows for {date_str}…")
+                hourly_dfs = []
+                num_hours = 23
+                for h in range(num_hours):
+                    loading_message.set(f"Fetching hour {h + 1}/{num_hours}…")
+                    wh, err_h, _, _ = fetch_traffic_window(api_base, date=date_str, start_hour=h, end_hour=h + 1)
+                    if err_h or wh is None or wh.empty:
+                        api_error.set(err_h or "No data for one or more hours")
+                        observations_df.set(None)
+                        window_stats_df.set(None)
+                        loading.set(False)
+                        loading_message.set("")
+                        return
+                    wh = wh.copy()
+                    wh["hour"] = h
+                    hourly_dfs.append(wh)
+                combined = pd.concat(hourly_dfs, ignore_index=True)
+                daily_agg = combined.groupby("segment_id", as_index=False).agg(
+                    mean_flow_vph=("mean_flow_vph", "mean"),
+                    mean_speed_kmh=("mean_speed_kmh", "mean"),
+                    mean_travel_time_sec=("mean_travel_time_sec", "mean"),
+                    vc_ratio=("vc_ratio", "mean"),
+                )
+                window_stats_df.set(daily_agg)
+                obs_daily = combined[["segment_id", "mean_flow_vph", "mean_speed_kmh", "vc_ratio", "hour"]].copy()
+                obs_daily = obs_daily.rename(columns={"mean_flow_vph": "flow_vph", "mean_speed_kmh": "speed_kmh"})
+                obs_daily["timestamp"] = pd.Timestamp(date_str) + pd.to_timedelta(obs_daily["hour"], unit="h")
+                observations_df.set(obs_daily.drop(columns=["hour"]))
+                print(f"[DEBUG] Loaded daily for date={date_str!r}: {len(combined)} rows (23 hours), {len(daily_agg)} segments")
             else:
-                observations_df.set(obs)
-                # Debug: confirm loaded subset
-                print(f"[DEBUG] Loaded {len(obs)} rows for {date_str}, hours {start_hour}-{end_hour}")
-                if "timestamp" in obs.columns and hasattr(obs["timestamp"], "dt"):
-                    print(f"[DEBUG] timestamp hours in data: {sorted(obs['timestamp'].dt.hour.unique().tolist())}")
+                p.set(0.5, message="Loading traffic data…", detail="Step 2 of 2: Fetching traffic window")
+                loading_message.set("Fetching traffic window…")
+                window_df, err2, _, _ = fetch_traffic_window(api_base, date=date_str, start_hour=start_hour, end_hour=end_hour)
+                if err2:
+                    api_error.set(err2)
+                    observations_df.set(None)
+                    window_stats_df.set(None)
+                else:
+                    window_stats_df.set(window_df)
+                    ts = pd.Timestamp(date_str) + pd.Timedelta(hours=start_hour)
+                    synthetic = window_df[["segment_id", "mean_flow_vph", "mean_speed_kmh", "vc_ratio"]].copy()
+                    synthetic = synthetic.rename(columns={"mean_flow_vph": "flow_vph", "mean_speed_kmh": "speed_kmh"})
+                    synthetic["timestamp"] = ts
+                    observations_df.set(synthetic)
+                    print(f"[DEBUG] Loaded window: {len(window_df)} segments for {date_str}, hours {start_hour}-{end_hour}")
             p.set(1, message="Done", detail="Data loaded")
         loading_message.set("Done")
         loading.set(False)
@@ -362,7 +411,33 @@ def server(input, output, session):
             print(f"[Congestion] seg_stats updated: mean vc_ratio = {mean_vc:.4f} (n_segments={len(stats)})")
 
     @reactive.Calc
+    def peak_hour_for_map():
+        """Network-wide peak congestion hour (0-23) for daily mode; None in hourly mode. Used so the daily map shows the worst hour."""
+        mode = (input.data_mode() or "hourly").strip().lower()
+        if mode != "daily":
+            return None
+        obs = observations()
+        seg = segments()
+        if obs is None or not isinstance(obs, pd.DataFrame) or obs.empty or "timestamp" not in obs.columns or "flow_vph" not in obs.columns:
+            return None
+        ts = pd.to_datetime(obs["timestamp"], utc=False)
+        obs = obs.copy()
+        obs["_hour"] = ts.dt.hour
+        agg = obs.groupby("_hour")["flow_vph"].mean()
+        if agg.empty or len(agg) < 2:
+            return int(agg.idxmax()) if not agg.empty else None
+        cap_avg = seg["capacity_vph"].mean() if seg is not None and isinstance(seg, pd.DataFrame) and not seg.empty and "capacity_vph" in seg.columns else 0
+        if not cap_avg or cap_avg <= 0:
+            return int(agg.idxmax())
+        vc_by_hour = agg / cap_avg
+        return int(vc_by_hour.idxmax())
+
+    @reactive.Calc
     def seg_stats():
+        # Use aggregated window from API when available (no client-side groupby)
+        window = window_stats_df.get()
+        if window is not None and isinstance(window, pd.DataFrame) and not window.empty:
+            return window.copy()
         obs = observations()
         seg = segments()
         if obs is None or seg is None or not isinstance(obs, pd.DataFrame) or not isinstance(seg, pd.DataFrame) or obs.empty or seg.empty:
@@ -403,16 +478,39 @@ def server(input, output, session):
         seg = segments()
         if seg is None or not isinstance(seg, pd.DataFrame) or seg.empty:
             return None
-        stats = seg_stats()
+        mode = (input.data_mode() or "hourly").strip().lower()
+        used_peak_hour = False  # True when daily map is built from peak-hour slice
+        # Daily mode: map shows the network-wide worst hour (same as KPI "Peak congestion hour")
+        if mode == "daily":
+            peak_h = peak_hour_for_map()
+            obs = observations()
+            if peak_h is not None and obs is not None and isinstance(obs, pd.DataFrame) and not obs.empty and "timestamp" in obs.columns:
+                ts = pd.to_datetime(obs["timestamp"], utc=False)
+                obs_peak = obs.loc[ts.dt.hour == peak_h]
+                if not obs_peak.empty:
+                    agg_cols = {"mean_flow_vph": ("flow_vph", "mean")}
+                    if "speed_kmh" in obs_peak.columns:
+                        agg_cols["mean_speed_kmh"] = ("speed_kmh", "mean")
+                    agg = obs_peak.groupby("segment_id").agg(**agg_cols).reset_index()
+                    if "mean_speed_kmh" not in agg.columns:
+                        agg["mean_speed_kmh"] = np.nan
+                    cap = seg.set_index("segment_id")["capacity_vph"]
+                    cap_mapped = agg["segment_id"].map(cap)
+                    agg["vc_ratio"] = np.where(cap_mapped > 0, agg["mean_flow_vph"] / cap_mapped, np.nan)
+                    agg["vc_ratio"] = agg["vc_ratio"].round(2)
+                    agg["mean_speed_kmh"] = agg["mean_speed_kmh"].round(1)
+                    agg["mean_flow_vph"] = agg["mean_flow_vph"].round(0)
+                    stats = agg
+                    used_peak_hour = True
+                else:
+                    stats = seg_stats()
+            else:
+                stats = seg_stats()
+        else:
+            stats = seg_stats()
         df = build_map_data(seg, stats)
         if df is None or df.empty:
             return df
-        mode = (input.data_mode() or "hourly").strip().lower()
-        if mode == "daily" and stats is not None and "peak_vc" in stats.columns and "peak_hour" in stats.columns:
-            df = df.merge(stats[["segment_id", "peak_vc", "peak_hour"]], on="segment_id", how="left")
-            df["color"] = df["peak_vc"].map(lambda v: vc_to_color(v))
-            df["tooltip_peak_vc"] = df["peak_vc"].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "—")
-            df["tooltip_peak_hour"] = df["peak_hour"].apply(lambda x: f"{int(x)}:00" if pd.notna(x) else "—")
         for col, src, fmt in (
             ("tooltip_vc", "vc_ratio", lambda x: f"{x:.2f}" if pd.notna(x) else "—"),
             ("tooltip_speed", "mean_speed_kmh", lambda x: f"{x:.1f}" if pd.notna(x) else "—"),
@@ -420,6 +518,12 @@ def server(input, output, session):
         ):
             if src in df.columns and col not in df.columns:
                 df[col] = df[src].apply(fmt)
+        # Daily map: when map uses peak-hour data, tooltip shows V/C, speed, flow at that hour
+        if mode == "daily" and used_peak_hour:
+            ph = peak_hour_for_map()
+            if ph is not None:
+                df["tooltip_peak_vc"] = df["vc_ratio"].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "—")
+                df["tooltip_peak_hour"] = f"{int(ph)}:00"
         return df
 
     @reactive.Calc
@@ -475,25 +579,27 @@ def server(input, output, session):
                 return "0"
             n = (stats["vc_ratio"] >= 0.8).sum()
             return str(int(n))
-        obs = observations()
-        if obs is None or not isinstance(obs, pd.DataFrame) or obs.empty or "timestamp" not in obs.columns:
-            return "—"
         try:
+            obs = observations()
+            if obs is None or not isinstance(obs, pd.DataFrame) or obs.empty:
+                return "—"
+            if "timestamp" not in obs.columns or "flow_vph" not in obs.columns:
+                return "—"
             obs = obs.copy()
             obs["hour"] = pd.to_datetime(obs["timestamp"], utc=False).dt.hour
+            agg = obs.groupby("hour")["flow_vph"].mean()
+            if agg.empty or len(agg) < 2:
+                return "—"
+            seg = segments()
+            cap_avg = seg["capacity_vph"].mean() if seg is not None and isinstance(seg, pd.DataFrame) and not seg.empty and "capacity_vph" in seg.columns else 0
+            if not cap_avg or cap_avg <= 0:
+                peak_h = int(agg.idxmax())
+            else:
+                vc_by_hour = agg / cap_avg
+                peak_h = int(vc_by_hour.idxmax())
+            return f"{peak_h}:00"
         except Exception:
             return "—"
-        agg = obs.groupby("hour")["flow_vph"].mean()
-        if agg.empty:
-            return "—"
-        seg = segments()
-        cap_avg = seg["capacity_vph"].mean() if seg is not None and isinstance(seg, pd.DataFrame) and not seg.empty and "capacity_vph" in seg.columns else 0
-        if not cap_avg or cap_avg <= 0:
-            peak_h = int(agg.idxmax())
-        else:
-            vc_by_hour = agg / cap_avg
-            peak_h = int(vc_by_hour.idxmax())
-        return f"{peak_h}:00"
 
     @render.text
     def metric_fourth():
@@ -529,9 +635,11 @@ def server(input, output, session):
             style="display: inline-block; margin-bottom: 0.75rem; padding: 0.35rem 0.75rem; font-size: 0.8rem; font-weight: 600; color: #1e293b; background: #e2e8f0; border-radius: 6px;",
         )
         if mode == "daily":
+            ph = peak_hour_for_map()
+            caption = f"Daily map: showing congestion at peak hour ({int(ph)}:00)" if ph is not None else "Daily map: showing congestion at peak hour"
             return ui.div(
                 badge,
-                ui.tags.p("Daily Map: colored by peak congestion (hour of peak shown in tooltip)", style="font-size: 0.75rem; color: #64748b; margin: 0 0 0.75rem 0;"),
+                ui.tags.p(caption, style="font-size: 0.75rem; color: #64748b; margin: 0 0 0.75rem 0;"),
             )
         return badge
 
@@ -673,7 +781,7 @@ def server(input, output, session):
         stats = seg_stats()
         seg = segments()
         if stats is None or seg is None or not isinstance(stats, pd.DataFrame) or not isinstance(seg, pd.DataFrame):
-            return ui.div("Load traffic to see worst segments.", style="color: #64748b; padding: 1rem;")
+            return ui.div("Load traffic to see most congested roads.", style="color: #64748b; padding: 1rem;")
         mode = (input.data_mode() or "hourly").strip().lower()
         TOP_N = 15
 
@@ -702,8 +810,8 @@ def server(input, output, session):
                 name = row.get("street_name") or sid
                 cls = row.get("road_class", "")
                 sev = row.get("severity", "")
-                rows.append(f"<tr><td>{sid}</td><td>{name}</td><td>{cls}</td><td>{flow_str}</td><td>{cap_str}</td><td>{vc_str}</td><td>{speed_str}</td><td>{tt_str}</td><td>{sev}</td></tr>")
-            thead = "<thead><tr><th>Segment</th><th>Street</th><th>Class</th><th>Flow (vph)</th><th>Capacity (vph)</th><th>V/C</th><th>Speed (km/h)</th><th>Travel time (s)</th><th>Severity</th></tr></thead>"
+                rows.append(f"<tr><td>{name}</td><td>{flow_str}</td><td>{cap_str}</td><td>{vc_str}</td><td>{speed_str}</td><td>{tt_str}</td><td>{sev}</td></tr>")
+            thead = "<thead><tr><th>Road</th><th>Traffic Volume</th><th>Road Capacity</th><th>Congestion Level</th><th>Avg Speed (km/h)</th><th>Avg Travel Time (sec)</th><th>Traffic Status</th></tr></thead>"
         else:
             merge = stats.merge(seg[["segment_id", "street_name"]], on="segment_id", how="left")
             merge["street_name"] = merge["street_name"].fillna("").astype(str).replace("", "(unnamed)")
@@ -724,7 +832,7 @@ def server(input, output, session):
                 name = row["street_name"]
                 sev = row["severity"]
                 rows.append(f"<tr><td>{name}</td><td>{vc_str}</td><td>{flow_str}</td><td>{n_str}</td><td>{sev}</td></tr>")
-            thead = "<thead><tr><th>Street</th><th>Peak V/C</th><th>Mean flow (vph)</th><th>Segments</th><th>Severity</th></tr></thead>"
+            thead = "<thead><tr><th>Road</th><th>Congestion Level</th><th>Traffic Volume</th><th>Segments</th><th>Traffic Status</th></tr></thead>"
         return ui.HTML(f'<table class="table table-sm">{thead}<tbody>{"".join(rows)}</tbody></table>')
 
     @render.ui
@@ -741,7 +849,14 @@ def server(input, output, session):
             ui.div("Same date/time uses cache.", {"class": "text-muted", "style": "font-size: 0.7rem; margin-top: 0.25rem;"}),
         )
 
-    OLLAMA_SYSTEM_PROMPT = "You are a traffic analyst assistant. Summarize congestion data for city staff, giving key insights and actionable recommendations in plain language."
+    OLLAMA_SYSTEM_PROMPT = """You are a friendly traffic analyst. Your summary will be read by residents, visitors, and city staff in a web app. Write in plain, conversational English but be informative.
+
+Rules:
+- Report only factual information from the data provided. Do not invent streets, conditions, or comparisons. Only mention streets that appear in the data the user gives you. Describe how bad congestion is (e.g. "heavily congested," "speeds in the 30s") based only on what the data shows for those streets.
+- Do not use markdown (no **, __, #, backticks). No emoji. No chatty openers like "Here's a summary" or "Certainly."
+- Break the response into multiple short sections. Do NOT output one long paragraph. Use blank lines between sections.
+- Name specific streets as hotspots only if they are in the provided data. For each, give 1-2 sentences in plain language (no segment IDs, no raw v/c or vph numbers).
+- Plain text only. Short paragraphs. Each hotspot gets its own short block."""
 
     @reactive.Effect
     @reactive.event(input.ai_analysis_btn)
@@ -825,26 +940,37 @@ def server(input, output, session):
                 else:
                     rows = []
 
-            user_prompt = f"""Summarize this traffic data for city staff:
+            # Prompt: factual only (streets and conditions from this data); conversational; multiple short blocks.
+            user_prompt = f"""Write a traffic summary for a web app. Use plain text only (no markdown). Be conversational but stick to the facts in the data below.
 
-- Mode: {mode.capitalize()}
-- Date: {date_str}
+Important: Only mention streets that appear in the "{top_label}" list below. Do not add any street or condition that is not supported by this data. Describe congestion in plain language (e.g. "heavily congested," "speeds in the 30s") based only on the relative severity and numbers in this dataset—do not speculate or compare to other days. Do NOT mention segment IDs or raw numbers (v/c, vph) in your reply.
+
+Do NOT output one long paragraph. Break the reply into clear sections with blank lines between them.
+
+Data (this is the only source—only report on streets and conditions from here):
+- Mode: {mode.capitalize()}, Date: {date_str}
 {f'- Hour: {hour_val}' if mode == 'hourly' and hour_val is not None else ''}
 - {top_label}: {rows}
-- Mean speed (km/h): {kpi_speed}
-- Mean flow (vph): {kpi_flow}
-- Congested segments (v/c > 0.8): {kpi_congested}
+- Network-wide: mean speed {kpi_speed} km/h, mean flow {kpi_flow} vph, {kpi_congested} congested segments
 {f'- Peak congestion hour: {kpi_peak_hour}' if mode == 'daily' else ''}
 
-Provide:
-1. Key congestion hotspots
-2. Comparison to typical levels (if you can infer)
-3. Peak hour warning (for daily) or hour snapshot note (for hourly)
-4. Recommendations (e.g., avoid streets, signal timing, adding lanes)
-Keep under ~150 words."""
+Required structure (use blank lines between sections):
+1. One short lead line (e.g. "Key hotspots for [date] at [time]:" or "Where congestion is worst today:").
+2. Then list 3 to 5 specific streets as hotspots. For each street, write 1-2 sentences on what to expect (e.g. "Main Street. Heavy congestion; expect slow going through downtown." then a blank line, then "Eden Street. One of the busiest corridors; speeds drop into the 30s in several places."). Each hotspot = its own short block.
+3. One short closing line with practical advice (e.g. "Allow extra time or consider alternate routes during peak times.").
 
-            out = _call_ollama(user_prompt, OLLAMA_SYSTEM_PROMPT)
+Keep under 220 words. Use multiple short paragraphs; do not merge everything into one paragraph."""
+
+            # Ollama Cloud: chat API expects messages list; no local Ollama.
+            messages = [
+                {"role": "system", "content": OLLAMA_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ]
+            out = query_llm(messages, stream=False)
+            out = sanitize_report_text(out) if out else ""
             ai_summary_text.set(out if out else "Summary unavailable.")
+        except OllamaCloudError as e:
+            ai_summary_text.set(f"Summary unavailable. ({e})")
         except Exception as e:
             err_msg = str(e)[:200] if str(e) else type(e).__name__
             print(f"[AI Summary] Error: {e}", flush=True)

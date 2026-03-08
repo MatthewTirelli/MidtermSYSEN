@@ -1,28 +1,42 @@
 #!/usr/bin/env bash
-# Create venv (if needed), install dependencies, and run the Bar Harbor Traffic Streamlit app.
-# Run from project root: ./run_app.sh
+# Run the Bar Harbor Congestion Intelligence Dashboard (Shiny for Python).
+# Must be run from the project root: ./run_app.sh
 
 set -e
-cd "$(dirname "$0")"
+REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
+cd "$REPO_ROOT"
 
-VENV_DIR="venv"
-
-if [ ! -d "$VENV_DIR" ]; then
-  echo "Creating virtual environment in $VENV_DIR..."
-  python3 -m venv "$VENV_DIR"
+# Check we're in the right place
+if [ ! -f "app/app.py" ]; then
+  echo "Error: app/app.py not found. Run this script from the project root (MidtermSYSEN/)."
+  echo "  cd /path/to/MidtermSYSEN"
+  echo "  ./run_app.sh"
+  exit 1
 fi
 
-echo "Activating virtual environment..."
-source "$VENV_DIR/bin/activate"
+# Use venv if it exists
+if [ -d "venv" ]; then
+  source venv/bin/activate
+  echo "Using virtual environment: $REPO_ROOT/venv"
+else
+  echo "Note: No 'venv' found. Using system Python."
+  echo "  First time? Create one and install deps:"
+  echo "    python3 -m venv venv"
+  echo "    source venv/bin/activate"
+  echo "    pip install -r requirements.txt"
+  echo ""
+fi
 
-echo "Installing dependencies from requirements.txt..."
-pip install -q -r requirements.txt
+# Optional: load .env from project root so OLLAMA_API_KEY etc. are set
+if [ -f ".env" ]; then
+  set -a
+  source .env
+  set +a
+  echo "Loaded .env"
+fi
 
-# Optional: install pydeck if not present (used by the map)
-pip install -q pydeck 2>/dev/null || true
-
+echo "Starting Bar Harbor Congestion Intelligence Dashboard..."
+echo "  → http://127.0.0.1:8767"
+echo "  (Stop with Ctrl+C)"
 echo ""
-echo "Starting Bar Harbor Traffic app..."
-echo "Open the URL shown below in your browser (e.g. http://localhost:8501)"
-echo ""
-streamlit run app/streamlit_app.py "$@"
+exec shiny run app/app.py --port 8767 "$@"

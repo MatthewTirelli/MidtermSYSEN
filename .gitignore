@@ -1,7 +1,11 @@
 data_pipeline/output/
 .DS_Store
-data_pipeline/.DS_Store
 .env
 venv/
+.venv/
+.venv312/
+app/.venv/
+app/.venv312/
 __pycache__/
 *.pyc
+*.pyo

@@ -1,0 +1,12 @@
+{
+    "https://connect.systems-apps.com": {
+        "server_url": "https://connect.systems-apps.com",
+        "filename": "/Users/mjt/Desktop/MidtermSYSEN/app",
+        "app_url": "https://connect.systems-apps.com/content/f1c3342c-6dbe-4a85-98b9-95bc77873c13/",
+        "app_id": "116",
+        "app_guid": "f1c3342c-6dbe-4a85-98b9-95bc77873c13",
+        "title": "app",
+        "app_mode": "python-shiny",
+        "app_store_version": 1
+    }
+}

@@ -14,7 +14,13 @@ folium>=0.15.0
 streamlit-folium>=0.15.0
 
 # Shiny for Python dashboard (Bar Harbor Congestion Intelligence)
+# Includes: traffic API client, Ollama Cloud AI summary, map (PyDeck + Shapely)
 shiny>=0.9.0
 pydeck>=0.8.0
 shinywidgets>=0.3.0
 python-dotenv>=1.0.0
+httpx>=0.26.0
+pandas>=2.0.0
+numpy>=1.24.0
+plotly>=5.18.0
+shapely>=2.0.0

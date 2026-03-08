@@ -1,6 +1,6 @@
 """
 Cached API client for Bar Harbor Traffic Report API.
-GET /segments and GET /observations.
+GET /segments, GET /observations (legacy), GET /traffic/window (aggregated).
 Returns (df, error, status_code, num_records).
 """
 
@@ -74,6 +74,39 @@ def fetch_observations(
         df = pd.DataFrame(data)
         if "timestamp" in df.columns:
             df["timestamp"] = pd.to_datetime(df["timestamp"], utc=False)
+        _api_cache[key] = (df, None)
+        return df, None, status_code, len(df)
+    except httpx.HTTPStatusError as e:
+        return None, str(e), (e.response.status_code if e.response else None), None
+    except Exception as e:
+        return None, str(e), None, None
+
+
+def fetch_traffic_window(
+    base_url: str,
+    *,
+    date: str,
+    start_hour: int,
+    end_hour: int,
+) -> tuple[Optional[pd.DataFrame], Optional[str], Optional[int], Optional[int]]:
+    """
+    Call GET /traffic/window. Returns one row per segment with mean_flow_vph,
+    mean_speed_kmh, mean_travel_time_sec, vc_ratio. Cached by (date, start_hour, end_hour).
+    """
+    params = {"date": str(date).strip(), "start_hour": int(start_hour), "end_hour": int(end_hour)}
+    key = _cache_key("traffic/window", params)
+    if key in _api_cache:
+        d, err = _api_cache[key]
+        return d, err, 200 if d is not None else None, len(d) if d is not None and isinstance(d, pd.DataFrame) else None
+    url = f"{base_url.rstrip('/')}/traffic/window"
+    try:
+        r = httpx.get(url, params=params, timeout=HTTP_TIMEOUT)
+        status_code = r.status_code
+        r.raise_for_status()
+        data = r.json()
+        if not data:
+            return None, "No data from /traffic/window", status_code, 0
+        df = pd.DataFrame(data)
         _api_cache[key] = (df, None)
         return df, None, status_code, len(df)
     except httpx.HTTPStatusError as e:

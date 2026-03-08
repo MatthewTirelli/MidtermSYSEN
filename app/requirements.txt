@@ -1,0 +1,8 @@
+shiny==1.0.0
+pandas>=2.1,<3
+numpy>=1.26,<2
+plotly>=5.18,<6
+pydeck>=0.9
+httpx>=0.27
+python-dotenv>=1.0
+shapely>=2.0
